@@ -8,9 +8,12 @@
 from keras.datasets import mnist
 from keras.utils import to_categorical
 from keras.models import Sequential
-from keras.layers import Conv2D, MaxPooling2D, Dense, Flatten
-from keras.optimizers import SGD
+from keras.layers import Conv2D, Dense, Flatten, Lambda, Dropout
+from keras.layers import Convolution2D, MaxPooling2D, BatchNormalization
+from keras.layers.normalization import BatchNormalization
+from keras.optimizers import SGD, Adam
 from keras import models
+from keras.preprocessing.image import ImageDataGenerator
 
 from matplotlib import pyplot
 import matplotlib.cm as cm
@@ -23,14 +26,17 @@ import numpy as np
 
 from util import Utilities
 
-digit_model = "model/digit_clf_mnist.h5"
+cnn_model = "model/mnist_cnn_tx.h5"
+bn_model = "model/mnist_bn_tx.h5"
+test_folder = "test_data"
+test_label = "test_data/test_data.csv"
+batch_size = 100
 
 class DataProcessor:
     def __init__(self):
-        print("\n Preparing Data...")
+        print("\n Preparing Dataset...")
 
-        # load train and test dataset
-
+    # load train and test dataset
     def load_mnist_dataset(self):
         # load dataset
         (train_x, train_y), (test_x, test_y) = mnist.load_data()
@@ -41,8 +47,7 @@ class DataProcessor:
         train_y = to_categorical(train_y)
         test_y = to_categorical(test_y)
         return train_x, train_y, test_x, test_y
-        # return train_x[:4000], train_y[:4000], test_x[:200], test_y[:200]
-
+        # return train_x[:5000], train_y[:5000], test_x[:500], test_y[:500]
 
     # scale pixels
     def prep_pixels(self, train, test):
@@ -69,12 +74,22 @@ class DataProcessor:
         img = img / 255.0
         return img
 
-class CnnClassifier:
+    def data_agumentation(self, train_x, train_y, val_x, val_y):
+        # transform train data to be more robust
+        gen = ImageDataGenerator(rotation_range=8, width_shift_range=0.08, shear_range=0.3,
+                                 height_shift_range=0.08, zoom_range=0.08)
+
+        batches = gen.flow(train_x, train_y, batch_size=100)
+        val_batches = gen.flow(val_x, val_y, batch_size=100)
+        return batches, val_batches
+
+
+class DigitClassifier:
     def __init__(self):
-        print("\n Initializing training...")
+        print("\n Initializing ML Model...")
 
     # define cnn model
-    def define_model(self):
+    def get_cnn_model(self):
         model = Sequential()
         model.add(Conv2D(32, (3, 3), activation='relu', kernel_initializer='he_uniform', input_shape=(28, 28, 1)))
         model.add(MaxPooling2D((2, 2)))
@@ -89,46 +104,97 @@ class CnnClassifier:
         model.compile(optimizer=opt, loss='categorical_crossentropy', metrics=['accuracy'])
         return model
 
-    # plot learning curves
-    def plot_train_result(self, history):
-        pyplot.subplot(2, 1, 1)
-        pyplot.title('Cross Entropy Loss')
-        pyplot.plot(history.history['loss'], color='blue', label='train')
-        pyplot.plot(history.history['val_loss'], color='orange', label='test')
-        # plot accuracy
-        pyplot.subplot(2, 1, 2)
-        pyplot.title('Classification Accuracy')
-        pyplot.plot(history.history['acc'], color='blue', label='train')
-        pyplot.plot(history.history['val_acc'], color='orange', label='test')
-        pyplot.savefig("results/train_error.pdf")
+    def get_bn_model(self, mean_px, std_px):
+        def standardize(x):
+            return (x - mean_px) / std_px
+        model = Sequential([
+                    Lambda(standardize, input_shape=(28,28,1)),
+                    Convolution2D(32,(3,3), activation='relu'),
+                    BatchNormalization(axis=1),
+                    Convolution2D(32,(3,3), activation='relu'),
+                    MaxPooling2D(),
+                    BatchNormalization(axis=1),
+                    Convolution2D(64,(3,3), activation='relu'),
+                    BatchNormalization(axis=1),
+                    Convolution2D(64,(3,3), activation='relu'),
+                    MaxPooling2D(),
+                    Flatten(),
+                    BatchNormalization(),
+                    Dense(100, activation='relu'),
+                    BatchNormalization(),
+                    Dense(10, activation='softmax')
+                    ])
+        model.compile(Adam(), loss='categorical_crossentropy', metrics=['accuracy'])
+        return model
+
+
+def train_bn_on_mnist():
+    data = DataProcessor()
+    # load data
+    train_x, train_y, val_x, val_y = data.load_mnist_dataset()
+
+    # prepare pixel data
+    train_x, val_x = data.prep_pixels(train_x, val_x)
+
+    mean_px = train_x.mean().astype(np.float32)
+    std_px = train_x.std().astype(np.float32)
+
+    # transform train data to be more robust
+    data_gen = ImageDataGenerator(rotation_range=8, width_shift_range=0.12, shear_range=0.3,
+                             height_shift_range=0.12, zoom_range=0.1)
+
+    # call model and train it
+    digit_clf = DigitClassifier()
+    model = digit_clf.get_bn_model(mean_px, std_px)
+    model.optimizer.lr = 0.01
+    history = model.fit_generator(data_gen.flow(train_x, train_y, batch_size=batch_size),
+                                  epochs=5, validation_data=(val_x, val_y),
+                                  verbose=1, steps_per_epoch=train_x.shape[0] // batch_size)
+
+    # history = model.fit_generator(generator=batches, steps_per_epoch=batches.n, epochs=5,
+    #                                 validation_data=val_batches, validation_steps=val_batches.n)
+    model.save(bn_model)
+
+    util = Utilities()
+    util.plot_train_result(history)
 
 def train_cnn_on_mnist():
-
     data = DataProcessor()
     #load data
-    train_x, train_y, test_x, test_y = data.load_mnist_dataset()
+    train_x, train_y, val_x, val_y = data.load_mnist_dataset()
 
     #prepare pixel data
-    train_x, test_x = data.prep_pixels(train_x, test_x)
+    train_x, val_x = data.prep_pixels(train_x, val_x)
 
-    #call model and train it
-    cnn_clf = CnnClassifier()
-    model = cnn_clf.define_model()
-    history = model.fit(train_x, train_y, epochs=10, batch_size=32, verbose=1, validation_data=(test_x, test_y))
-    cnn_clf.plot_train_result(history)
-    model.save(digit_model)
+    #build the model
+    digit_clf = DigitClassifier()
+    model = digit_clf.get_cnn_model()
+
+    #transform train data to be more robust
+    data_gen = ImageDataGenerator(rotation_range=8, width_shift_range=0.12, shear_range=0.3,
+                             height_shift_range=0.12, zoom_range=0.1)
+
+    #fit the model with agumented data
+    history = model.fit_generator(data_gen.flow(train_x, train_y, batch_size=batch_size),
+                                  epochs=15, validation_data=(val_x, val_y),
+                                  verbose=1, steps_per_epoch=train_x.shape[0] // batch_size)
+    # history = c_model.fit(train_x, train_y, epochs=15, batch_size=64, verbose=1, validation_data=(val_x, val_y))
+    model.save(cnn_model)
+
+    util = Utilities()
+    util.plot_train_result(history)
 
 
-def test_on_covid_data():
-    test_folder ="test_data"
-    test_y = pd.read_csv(test_folder + "/test_data.csv", header=0, index_col=0, squeeze=True).to_dict()
+def test_on_covid_data(model_name):
+    test_y = pd.read_csv(test_label, header=0, index_col=0, squeeze=True).to_dict()
     # print("test: ", test_y)
-    ml_model = models.load_model(digit_model)
+    ml_model = models.load_model(model_name)
 
     data = DataProcessor()
     true_y = []
     pred_y = []
     error_file = []
+    correct_class = []
     for file in glob.glob(test_folder+"/*.png"):
         test_image = data.load_test_images(file)
         y = ml_model.predict_classes(test_image)
@@ -136,6 +202,8 @@ def test_on_covid_data():
         true_y.append(test_y[file.split('/')[1]])
         if y != test_y[file.split('/')[1]]:
             error_file.append([test_image, y, test_y[file.split('/')[1]]])
+        else:
+            correct_class.append([test_image, y, test_y[file.split('/')[1]]])
 
     print(metrics.classification_report(true_y, pred_y))
     print("Accuracy : %0.3f" % metrics.accuracy_score(true_y, pred_y))
@@ -145,9 +213,12 @@ def test_on_covid_data():
     util = Utilities()
     util.plot_confusion_matrix(confusion_mtx, classes=range(10))
 
-    util.display_errors(error_file)
+    util.display_classification(correct_class)
 
 
 if __name__ == "__main__":
     # train_cnn_on_mnist()
-    test_on_covid_data()
+
+    # train_bn_on_mnist()
+
+    test_on_covid_data(cnn_model)
